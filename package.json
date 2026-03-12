@@ -1,0 +1,77 @@
+{
+  "name": "mongodb-task-queue",
+  "version": "0.1.0",
+  "description": "MongoDB-based task queue with worker orchestration, queue groups, concurrency control, and heartbeat monitoring",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./nestjs": {
+      "types": "./dist/nestjs.d.ts",
+      "import": "./dist/nestjs.mjs",
+      "require": "./dist/nestjs.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint \"{src,tests}/**/*.ts\" --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "prettier": {
+    "semi": true,
+    "singleQuote": true,
+    "printWidth": 120,
+    "tabWidth": 4,
+    "trailingComma": "es5",
+    "arrowParens": "avoid"
+  },
+  "keywords": [
+    "mongodb",
+    "queue",
+    "task-queue",
+    "job-queue",
+    "worker",
+    "concurrency",
+    "change-streams"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "mongodb": "^5.7.0 || ^6.0.0 || ^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@nestjs/common": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@nestjs/common": "^10.4.0",
+    "@types/node": "^25.4.0",
+    "eslint": "^10.0.3",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "globals": "^17.4.0",
+    "mongodb": "^6.12.0",
+    "mongodb-memory-server": "^10.4.0",
+    "prettier": "^3.8.1",
+    "tsup": "^8.3.6",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.57.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
