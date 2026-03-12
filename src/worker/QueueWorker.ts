@@ -112,11 +112,14 @@ export class QueueWorker {
     }
 
     /** Enqueue a task into a named queue */
-    async add(payload: unknown, queueName: string, options?: { hashKey?: string; delay?: number }): Promise<string> {
-        const queue = this.queues.get(queueName);
+    async add<U = unknown>(
+        payload: U,
+        queueName: string,
+        options?: { hashKey?: keyof U; delay?: number }
+    ): Promise<string> {
+        const queue = this.queues.get(queueName) as MongoQueue<U> | undefined;
         if (!queue) throw new Error(`Unknown queue: ${queueName}`);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return queue.add(payload, options as any);
+        return queue.add(payload, options);
     }
 
     /** Get direct access to a MongoQueue instance */

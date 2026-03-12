@@ -206,7 +206,6 @@ describe('MongoQueue', () => {
 
     describe('constructor validation', () => {
         it('should throw when no db is provided', () => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             expect(() => new MongoQueue(null as any, 'test')).toThrow('Please provide a mongodb Db instance');
         });
 

@@ -234,10 +234,8 @@ describe('QueueWorker', () => {
         const ignored: unknown[] = [];
 
         const handler: TaskHandler = {
-            async *work(payload) {
+            async *work() {
                 throw new Error('ignorable error');
-                // eslint-disable-next-line no-unreachable
-                yield true;
             },
             onError: payload => {
                 ignored.push(payload);
@@ -437,14 +435,24 @@ describe('QueueWorker', () => {
     });
 
     it('should throw when adding to an unknown queue', async () => {
-        worker = createWorker({ async *work() { yield true; }, onError: () => ErrorAction.FAIL });
+        worker = createWorker({
+            async *work() {
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        });
         await worker.init();
 
         await expect(worker.add({}, 'nonexistent-queue')).rejects.toThrow('Unknown queue');
     });
 
     it('should throw when getting an unknown queue', async () => {
-        worker = createWorker({ async *work() { yield true; }, onError: () => ErrorAction.FAIL });
+        worker = createWorker({
+            async *work() {
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        });
         await worker.init();
 
         expect(() => worker.getQueue('nonexistent-queue')).toThrow('Unknown queue');

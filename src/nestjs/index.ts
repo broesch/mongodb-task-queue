@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument */
+// NestJS DI uses any[] for injection tokens by design — no way to avoid this here.
 import type { DynamicModule, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { QueueWorker, type QueueWorkerOptions } from '../worker/QueueWorker.js';
 
