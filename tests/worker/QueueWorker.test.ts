@@ -229,6 +229,272 @@ describe('QueueWorker', () => {
         await worker.stop();
         await workerPromise;
     });
+
+    it('should ignore error and ack when IGNORE action is returned', async () => {
+        const ignored: unknown[] = [];
+
+        const handler: TaskHandler = {
+            async *work(payload) {
+                throw new Error('ignorable error');
+                // eslint-disable-next-line no-unreachable
+                yield true;
+            },
+            onError: payload => {
+                ignored.push(payload);
+                return ErrorAction.IGNORE;
+            },
+        };
+
+        worker = createWorker(handler);
+        await worker.init();
+
+        const queueNames = [...(worker as any).queues.keys()];
+        await worker.add({ type: 'ignore-test' }, queueNames[0]);
+
+        const workerPromise = worker.start('default');
+
+        await waitFor(() => ignored.length > 0, 5000);
+
+        await worker.stop();
+        await workerPromise;
+
+        expect(ignored).toHaveLength(1);
+
+        // Message should be acked (done), not back in the queue
+        const q = worker.getQueue(queueNames[0]);
+        expect(await q.size()).toBe(0);
+        expect(await q.done()).toBe(1);
+    });
+
+    it('should enforce concurrency limit', async () => {
+        let concurrentCount = 0;
+        let maxConcurrentSeen = 0;
+        const concurrencyLimit = 2;
+
+        // Latch to hold tasks open until we've checked concurrency
+        let resolveAll: () => void;
+        const allDone = new Promise<void>(r => (resolveAll = r));
+
+        const handler: TaskHandler = {
+            async *work() {
+                concurrentCount++;
+                maxConcurrentSeen = Math.max(maxConcurrentSeen, concurrentCount);
+                yield true;
+                await allDone;
+                concurrentCount--;
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+
+        const id = `${Date.now()}-conc`;
+        worker = new QueueWorker({
+            db,
+            queues: [{ name: `conc-q-${id}`, group: 'conc', priority: 1, maxTaskAge: 10 }],
+            groups: { conc: { concurrency: concurrencyLimit, pollingInterval: 100, useChangeStreams: false } },
+            handler,
+            logger: { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} },
+        });
+        await worker.init();
+
+        const queueNames = [...(worker as any).queues.keys()];
+        // Add more tasks than the concurrency limit
+        for (let i = 0; i < 5; i++) {
+            await worker.add({ n: i }, queueNames[0]);
+        }
+
+        const workerPromise = worker.start('conc');
+
+        // Wait until we've hit the limit
+        await waitFor(() => maxConcurrentSeen >= concurrencyLimit, 5000);
+        resolveAll!();
+
+        await worker.stop(3000);
+        await workerPromise;
+
+        // Never exceeded the limit
+        expect(maxConcurrentSeen).toBeLessThanOrEqual(concurrencyLimit);
+    });
+
+    it('should respect weight-based concurrency', async () => {
+        let concurrentCount = 0;
+        let maxConcurrentSeen = 0;
+
+        let resolveAll: () => void;
+        const allDone = new Promise<void>(r => (resolveAll = r));
+
+        const handler: TaskHandler = {
+            async *work() {
+                concurrentCount++;
+                maxConcurrentSeen = Math.max(maxConcurrentSeen, concurrentCount);
+                yield true;
+                await allDone;
+                concurrentCount--;
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+
+        const id = `${Date.now()}-weight`;
+        // concurrency=2, each task has weight=2 → only 1 task at a time
+        worker = new QueueWorker({
+            db,
+            queues: [{ name: `weight-q-${id}`, group: 'w', priority: 1, maxTaskAge: 10, weight: 2 }],
+            groups: { w: { concurrency: 2, pollingInterval: 100, useChangeStreams: false } },
+            handler,
+            logger: { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} },
+        });
+        await worker.init();
+
+        const queueNames = [...(worker as any).queues.keys()];
+        for (let i = 0; i < 4; i++) {
+            await worker.add({ n: i }, queueNames[0]);
+        }
+
+        const workerPromise = worker.start('w');
+
+        await waitFor(() => maxConcurrentSeen >= 1, 5000);
+        resolveAll!();
+
+        await worker.stop(3000);
+        await workerPromise;
+
+        // Weight=2, concurrency=2 → max 1 concurrent task (2/2=1)
+        expect(maxConcurrentSeen).toBe(1);
+    });
+
+    it('should stop gracefully and wait for in-flight tasks', async () => {
+        const completed: number[] = [];
+        let taskStarted = false;
+
+        const handler: TaskHandler = {
+            async *work(payload: any) {
+                taskStarted = true;
+                // Simulate slow task
+                await new Promise(r => setTimeout(r, 200));
+                yield true;
+                completed.push(payload.n as number);
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+
+        worker = createWorker(handler);
+        await worker.init();
+
+        const queueNames = [...(worker as any).queues.keys()];
+        await worker.add({ n: 1 }, queueNames[0]);
+
+        const workerPromise = worker.start('default');
+
+        // Wait for task to start, then stop
+        await waitFor(() => taskStarted, 5000);
+        await worker.stop(2000); // generous timeout for the 200ms task
+        await workerPromise;
+
+        // Task should have completed despite stop being called
+        expect(completed).toContain(1);
+    });
+
+    it('should timeout a task that exceeds maxTaskAge', async () => {
+        const errors: unknown[] = [];
+
+        const handler: TaskHandler = {
+            async *work() {
+                yield true;
+                // Never yield again — task hangs
+                await new Promise(r => setTimeout(r, 60000));
+                yield true;
+            },
+            onError: (_payload, _tries, error) => {
+                errors.push(error);
+                return ErrorAction.FAIL;
+            },
+        };
+
+        const id = `${Date.now()}-timeout`;
+        worker = new QueueWorker({
+            db,
+            queues: [{ name: `timeout-q-${id}`, group: 'to', priority: 1, maxTaskAge: 1 }],
+            groups: { to: { concurrency: 1, pollingInterval: 100, useChangeStreams: false } },
+            handler,
+            logger: { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} },
+        });
+        await worker.init();
+
+        const queueNames = [...(worker as any).queues.keys()];
+        await worker.add({ type: 'slow' }, queueNames[0]);
+
+        const workerPromise = worker.start('to');
+
+        // Wait for the timeout error to be reported (maxTaskAge=1s + buffer)
+        await waitFor(() => errors.length > 0, 5000);
+
+        await worker.stop();
+        await workerPromise;
+
+        expect(errors[0]).toBeInstanceOf(Error);
+        expect((errors[0] as Error).name).toBe('QueueTimeoutError');
+    });
+
+    it('should throw when adding to an unknown queue', async () => {
+        worker = createWorker({ async *work() { yield true; }, onError: () => ErrorAction.FAIL });
+        await worker.init();
+
+        await expect(worker.add({}, 'nonexistent-queue')).rejects.toThrow('Unknown queue');
+    });
+
+    it('should throw when getting an unknown queue', async () => {
+        worker = createWorker({ async *work() { yield true; }, onError: () => ErrorAction.FAIL });
+        await worker.init();
+
+        expect(() => worker.getQueue('nonexistent-queue')).toThrow('Unknown queue');
+    });
+
+    it('should process two independent groups in parallel', async () => {
+        const groupAStart = { time: 0 };
+        const groupBStart = { time: 0 };
+
+        const handler: TaskHandler = {
+            async *work(payload: any) {
+                if (payload.group === 'A') groupAStart.time = Date.now();
+                if (payload.group === 'B') groupBStart.time = Date.now();
+                // Hold both open briefly
+                await new Promise(r => setTimeout(r, 100));
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+
+        const id = `${Date.now()}-parallel`;
+        worker = new QueueWorker({
+            db,
+            queues: [
+                { name: `grp-a-${id}`, group: 'groupA', priority: 1, maxTaskAge: 5 },
+                { name: `grp-b-${id}`, group: 'groupB', priority: 1, maxTaskAge: 5 },
+            ],
+            groups: {
+                groupA: { concurrency: 1, pollingInterval: 100, useChangeStreams: false },
+                groupB: { concurrency: 1, pollingInterval: 100, useChangeStreams: false },
+            },
+            handler,
+            logger: { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} },
+        });
+        await worker.init();
+
+        const queueNames = [...(worker as any).queues.keys()];
+        await worker.add({ group: 'A' }, queueNames[0]);
+        await worker.add({ group: 'B' }, queueNames[1]);
+
+        const workerPromise = worker.start();
+
+        await waitFor(() => groupAStart.time > 0 && groupBStart.time > 0, 5000);
+
+        await worker.stop(2000);
+        await workerPromise;
+
+        // Both groups should have started within ~50ms of each other (parallel)
+        expect(Math.abs(groupAStart.time - groupBStart.time)).toBeLessThan(500);
+    });
 });
 
 function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {

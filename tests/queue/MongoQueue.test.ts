@@ -195,5 +195,83 @@ describe('MongoQueue', () => {
             expect(deleted).toBe(2);
             expect(await queue.total()).toBe(1);
         });
+
+        it('should return 0 when no messages match the filter', async () => {
+            await queue.add({ id: '1', data: 'hello' });
+            const deleted = await queue.remove({ 'payload.data': 'nonexistent' });
+            expect(deleted).toBe(0);
+            expect(await queue.total()).toBe(1);
+        });
+    });
+
+    describe('constructor validation', () => {
+        it('should throw when no db is provided', () => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            expect(() => new MongoQueue(null as any, 'test')).toThrow('Please provide a mongodb Db instance');
+        });
+
+        it('should throw when no name is provided', () => {
+            expect(() => new MongoQueue(db, '')).toThrow('Please provide a queue name');
+        });
+    });
+
+    describe('concurrent access', () => {
+        it('should give each concurrent consumer a different message', async () => {
+            await queue.add({ id: '1', data: 'a' });
+            await queue.add({ id: '2', data: 'b' });
+
+            const [msg1, msg2] = await Promise.all([queue.get(), queue.get()]);
+
+            expect(msg1).toBeDefined();
+            expect(msg2).toBeDefined();
+            expect(msg1!.id).not.toBe(msg2!.id);
+        });
+
+        it('should not deliver the same message to two concurrent consumers', async () => {
+            await queue.add({ id: '1', data: 'only-one' });
+
+            const [msg1, msg2] = await Promise.all([queue.get(), queue.get()]);
+
+            const received = [msg1, msg2].filter(Boolean);
+            expect(received).toHaveLength(1);
+        });
+    });
+
+    describe('ping edge cases', () => {
+        it('should throw when pinging an expired visibility window', async () => {
+            const shortQueue = new MongoQueue(db, `ping-exp-${Date.now()}`, { visibility: 1 });
+            await shortQueue.createIndexes();
+
+            await shortQueue.add({ id: '1', data: 'test' });
+            const msg = await shortQueue.get();
+
+            // Wait for visibility to expire
+            await new Promise(r => setTimeout(r, 1200));
+
+            await expect(shortQueue.ping(msg!.ack)).rejects.toThrow('unidentified ack');
+        });
+    });
+
+    describe('ack edge cases', () => {
+        it('should throw when acking an expired visibility window', async () => {
+            const shortQueue = new MongoQueue(db, `ack-exp-${Date.now()}`, { visibility: 1 });
+            await shortQueue.createIndexes();
+
+            await shortQueue.add({ id: '1', data: 'test' });
+            const msg = await shortQueue.get();
+
+            await new Promise(r => setTimeout(r, 1200));
+
+            await expect(shortQueue.ack(msg!.ack)).rejects.toThrow('unidentified ack');
+        });
+    });
+
+    describe('extra indexes', () => {
+        it('should create user-defined extra indexes without error', async () => {
+            const indexedQueue = new MongoQueue(db, `extra-idx-${Date.now()}`, {
+                extraIndexes: [{ key: { 'payload.id': 1 } }],
+            });
+            await expect(indexedQueue.createIndexes()).resolves.toBeUndefined();
+        });
     });
 });
