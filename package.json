@@ -2,6 +2,7 @@
   "name": "mongodb-task-queue",
   "version": "0.1.0",
   "description": "MongoDB-based task queue with worker orchestration, queue groups, concurrency control, and heartbeat monitoring",
+  "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
