@@ -151,9 +151,9 @@ export class QueueWorker {
                 const nextVisible = await this.getNextVisibleTime(group);
                 await this.watcher.waitForChange(
                     group.getCollectionNames(),
-                    'insert',
                     nextVisible,
-                    group.pollingInterval
+                    group.pollingInterval,
+                    group.useChangeStreams
                 );
                 if (this.stopped) break;
                 continue;

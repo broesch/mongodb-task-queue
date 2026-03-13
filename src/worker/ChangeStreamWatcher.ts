@@ -1,8 +1,6 @@
 import type { Db, ChangeStream } from 'mongodb';
 import type { Logger } from './types.js';
 
-export type WatchEvent = 'insert' | 'finish';
-
 export class ChangeStreamWatcher {
     private _available: boolean | null = null;
     private _activeStream: ChangeStream | null = null;
@@ -17,21 +15,21 @@ export class ChangeStreamWatcher {
     }
 
     /**
-     * Wait for a change event on any of the given collections, or until `orUntil` Date.
-     * Returns immediately if change streams are unavailable.
+     * Wait for an insert event on any of the given collections, or until `orUntil` Date.
+     * Pass `useChangeStreams: false` to skip change streams and poll instead.
      */
     async waitForChange(
         collectionNames: string[],
-        event: WatchEvent,
         orUntil?: Date | null,
-        pollingInterval?: number
+        pollingInterval?: number,
+        useChangeStreams = true
     ): Promise<void> {
-        if (this._available === false) {
+        if (!useChangeStreams || this._available === false) {
             return this.waitWithPolling(orUntil, pollingInterval ?? 2000);
         }
 
         try {
-            await this.watchForChange(collectionNames, event, orUntil);
+            await this.watchForChange(collectionNames, orUntil);
         } catch {
             // Change streams not available (not a replica set)
             this.logger.warn('Change streams unavailable, falling back to polling');
@@ -40,16 +38,8 @@ export class ChangeStreamWatcher {
         }
     }
 
-    private async watchForChange(collectionNames: string[], event: WatchEvent, orUntil?: Date | null): Promise<void> {
-        const operation =
-            event === 'insert'
-                ? { operationType: 'insert' }
-                : {
-                      $or: [
-                          { 'updateDescription.updatedFields.deleted': { $exists: true } },
-                          { 'updateDescription.updatedFields.requeued': { $exists: true } },
-                      ],
-                  };
+    private async watchForChange(collectionNames: string[], orUntil?: Date | null): Promise<void> {
+        const operation = { operationType: 'insert' };
 
         const pipeline = [
             {
