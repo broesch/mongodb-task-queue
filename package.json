@@ -3,19 +3,29 @@
   "version": "0.1.0",
   "description": "MongoDB-based task queue with worker orchestration, queue groups, concurrency control, and heartbeat monitoring",
   "type": "module",
-  "main": "dist/index.js",
-  "module": "dist/index.mjs",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./nestjs": {
-      "types": "./dist/nestjs.d.ts",
-      "import": "./dist/nestjs.mjs",
-      "require": "./dist/nestjs.js"
+      "import": {
+        "types": "./dist/nestjs.d.ts",
+        "default": "./dist/nestjs.js"
+      },
+      "require": {
+        "types": "./dist/nestjs.d.cts",
+        "default": "./dist/nestjs.cjs"
+      }
     }
   },
   "files": [
@@ -28,6 +38,7 @@
     "lint": "eslint \"{src,tests}/**/*.ts\" --fix",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "typecheck": "tsc --noEmit",
+    "prepare": "tsup",
     "prepublishOnly": "npm run build"
   },
   "prettier": {
