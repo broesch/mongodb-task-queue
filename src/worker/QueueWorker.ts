@@ -252,13 +252,15 @@ export class QueueWorker {
     }
 
     private async handleTaskError(message: Message, entry: QueueEntry, error: unknown): Promise<void> {
-        const action = this.handler.onError(message.payload, message.tries, error);
+        const decision = this.handler.onError(message.payload, message.tries, error);
+        const action = typeof decision === 'object' ? decision.action : decision;
+        const retryDelay = typeof decision === 'object' ? Math.max(0, decision.delay) : 0;
         const { name: queueName } = entry.definition;
 
         switch (action) {
             case ErrorAction.RETRY:
                 this.logger.log(`Retrying task ${message.id} from ${queueName}: ${String(error)}`);
-                await this.requeueTask(message, entry);
+                await this.requeueTask(message, entry, retryDelay);
                 break;
 
             case ErrorAction.FAIL:
@@ -279,11 +281,12 @@ export class QueueWorker {
         }
     }
 
-    private async requeueTask(message: Message, entry: QueueEntry): Promise<void> {
-        // Reset visibility so the task becomes immediately available again
+    private async requeueTask(message: Message, entry: QueueEntry, delaySeconds = 0): Promise<void> {
+        // Make the task visible again — immediately, or after `delaySeconds` for a backoff.
+        const now = Date.now();
         await entry.queue.collection.updateOne(
             { _id: new ObjectId(message.id) },
-            { $set: { visible: new Date(), requeued: new Date() }, $unset: { ack: '' } }
+            { $set: { visible: new Date(now + delaySeconds * 1000), requeued: new Date(now) }, $unset: { ack: '' } }
         );
     }
 

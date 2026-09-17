@@ -25,6 +25,16 @@ export enum ErrorAction {
     IGNORE = 'IGNORE',
 }
 
+/** Retry, but make the task visible again only after `delay` seconds. */
+export interface RetryWithDelay {
+    action: ErrorAction.RETRY;
+    /** Seconds until the task becomes visible again. */
+    delay: number;
+}
+
+/** What `onError` may return: a bare action, or a retry with a delay. */
+export type ErrorDecision = ErrorAction | RetryWithDelay;
+
 export interface TaskContext {
     /** Enqueue a follow-up task into a named queue */
     add(payload: unknown, queueName: string): Promise<string>;
@@ -38,7 +48,7 @@ export interface TaskHandler<T = unknown> {
     /** Process a task. Yield `true` as a heartbeat to extend the visibility window. */
     work(payload: T, ctx: TaskContext): AsyncGenerator<true>;
     /** Decide what to do on error. Called with the number of attempts so far. */
-    onError(payload: T, tries: number, error: unknown): ErrorAction;
+    onError(payload: T, tries: number, error: unknown): ErrorDecision;
     /** Called when a task is permanently failed (after onError returns FAIL). */
     onFail?(payload: T, error: unknown): Promise<void>;
 }

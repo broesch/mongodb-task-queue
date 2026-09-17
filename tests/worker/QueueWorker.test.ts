@@ -132,6 +132,39 @@ describe('QueueWorker', () => {
         expect(attempts).toBe(3);
     });
 
+    it('should delay a retry when onError returns a delay', async () => {
+        const attempts: number[] = [];
+
+        const handler: TaskHandler = {
+            async *work() {
+                attempts.push(Date.now());
+                if (attempts.length === 1) {
+                    throw new Error('throttled');
+                }
+                yield true;
+            },
+            onError: () => ({ action: ErrorAction.RETRY, delay: 1 }),
+        };
+
+        worker = createWorker(handler);
+        await worker.init();
+
+        const queueNames = [...(worker as any).queues.keys()];
+        await worker.add({ type: 'delayed-retry' }, queueNames[0]);
+
+        const workerPromise = worker.start('default');
+
+        await waitFor(() => attempts.length >= 2, 5000);
+
+        await worker.stop();
+        await workerPromise;
+
+        expect(attempts).toHaveLength(2);
+        const gap = attempts[1] - attempts[0];
+        expect(gap).toBeGreaterThanOrEqual(900); // honoured the 1 s delay …
+        expect(gap).toBeLessThan(3000); // … and was requeued, not re-delivered by the 5 s visibility timeout
+    });
+
     it('should call onFail when task permanently fails', async () => {
         const failed: unknown[] = [];
 

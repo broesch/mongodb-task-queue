@@ -6,7 +6,16 @@ export type { Message, AddOptions, QueueOptions } from './queue/types.js';
 export { QueueWorker } from './worker/QueueWorker.js';
 export type { QueueWorkerOptions } from './worker/QueueWorker.js';
 export { ErrorAction } from './worker/types.js';
-export type { QueueDefinition, GroupOptions, TaskHandler, TaskContext, TaskInfo, Logger } from './worker/types.js';
+export type {
+    QueueDefinition,
+    GroupOptions,
+    TaskHandler,
+    TaskContext,
+    TaskInfo,
+    Logger,
+    RetryWithDelay,
+    ErrorDecision,
+} from './worker/types.js';
 
 // Errors
 export { QueueTimeoutError, PingError, AckError, WrongAckIdError } from './errors/index.js';
