@@ -5,6 +5,7 @@ export type { Message, AddOptions, QueueOptions } from './queue/types.js';
 // Layer 2: Worker orchestration
 export { QueueWorker } from './worker/QueueWorker.js';
 export type { QueueWorkerOptions } from './worker/QueueWorker.js';
+export { ConcurrencyLimiter } from './worker/ConcurrencyLimiter.js';
 export { ErrorAction } from './worker/types.js';
 export type {
     QueueDefinition,
