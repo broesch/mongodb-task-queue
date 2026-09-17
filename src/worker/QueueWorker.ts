@@ -7,6 +7,7 @@ import { QueueTimeoutError, PingError, AckError, WrongAckIdError } from '../erro
 import { raceWithTimeout } from './HeartbeatRunner.js';
 import { ChangeStreamWatcher } from './ChangeStreamWatcher.js';
 import { QueueGroup, type QueueEntry } from './QueueGroup.js';
+import type { ConcurrencyLimiter } from './ConcurrencyLimiter.js';
 import type {
     QueueDefinition,
     GroupOptions,
@@ -31,6 +32,11 @@ export interface QueueWorkerOptions {
     groups: Record<string, GroupOptions>;
     handler: TaskHandler;
     logger?: Logger;
+    /**
+     * Optional limiter shared with other QueueWorkers. A slot is acquired BEFORE a task is
+     * claimed, so tasks that cannot run yet stay visible and unclaimed in their queue.
+     */
+    limiter?: ConcurrencyLimiter;
 }
 
 interface RunningTask extends TaskInfo {
@@ -46,11 +52,16 @@ export class QueueWorker {
     private readonly runningTasks: RunningTask[] = [];
     private readonly watcher: ChangeStreamWatcher;
     private stopped = false;
+    private readonly limiter?: ConcurrencyLimiter;
+    private stopSignal!: Promise<null>;
+    private resolveStop!: () => void;
 
     constructor(options: QueueWorkerOptions) {
         this.db = options.db;
         this.handler = options.handler;
         this.logger = options.logger ?? defaultLogger;
+        this.limiter = options.limiter;
+        this.armStopSignal();
         this.watcher = new ChangeStreamWatcher(this.db, this.logger);
 
         // Build queue instances and groups
@@ -91,6 +102,7 @@ export class QueueWorker {
 
     /** Start processing tasks. Runs indefinitely until stop() is called. */
     async start(groupName?: string): Promise<void> {
+        if (this.stopped) this.armStopSignal();
         this.stopped = false;
 
         const groupNames = groupName ? [groupName] : Array.from(this.groups.keys());
@@ -101,6 +113,7 @@ export class QueueWorker {
     /** Graceful shutdown: stop accepting new tasks, wait for in-flight tasks to complete. */
     async stop(timeoutMs: number = 30000): Promise<void> {
         this.stopped = true;
+        this.resolveStop();
         await this.watcher.close();
 
         if (this.runningTasks.length > 0) {
@@ -170,9 +183,22 @@ export class QueueWorker {
         for (const entry of group.getQueues()) {
             if (this.stopped) return;
 
+            // Shared limiter: take a slot BEFORE claiming, so a waiting task stays unclaimed.
+            const release = await this.acquireSlot(entry.definition.weight ?? 1);
+            if (release === null) return; // stopped while waiting
+
             // Try to get a message directly (fixes race condition: no separate size() check)
-            const message = await entry.queue.get();
-            if (!message) continue;
+            let message: Message | undefined;
+            try {
+                message = await entry.queue.get();
+            } catch (e) {
+                release();
+                throw e;
+            }
+            if (!message) {
+                release();
+                continue;
+            }
 
             this.logger.log(`Got task ${message.id} from ${entry.definition.name}`);
 
@@ -182,6 +208,7 @@ export class QueueWorker {
 
             // Run task in background (no await)
             void task.promise.finally(() => {
+                release();
                 const idx = this.runningTasks.indexOf(task);
                 if (idx !== -1) this.runningTasks.splice(idx, 1);
             });
@@ -324,6 +351,33 @@ export class QueueWorker {
         if (groupTasks.length === 0) return;
 
         await Promise.race(groupTasks.map(t => t.promise)).catch(() => {});
+    }
+
+    private armStopSignal(): void {
+        this.stopSignal = new Promise<null>(resolve => {
+            this.resolveStop = () => resolve(null);
+        });
+    }
+
+    /**
+     * Acquire a slot from the shared limiter. Resolves with a release function (a no-op when no
+     * limiter is configured), or `null` when the worker was stopped while waiting.
+     */
+    private async acquireSlot(weight: number): Promise<(() => void) | null> {
+        if (!this.limiter) return () => {};
+
+        const pending = this.limiter.acquire(weight);
+        const release = await Promise.race([pending, this.stopSignal]);
+        if (release === null) {
+            // Stopped first: hand the slot straight back whenever it is eventually granted.
+            void pending.then(late => late());
+            return null;
+        }
+        if (this.stopped) {
+            release();
+            return null;
+        }
+        return release;
     }
 }
 
