@@ -111,7 +111,9 @@ export class MongoQueue<T = unknown> {
         if (raw === undefined || raw === null) {
             throw new Error(`MongoQueue.add(): payload has no value for hashKey "${String(hashKey)}"`);
         }
-        const dedup = String(raw);
+        // Objects (ObjectId, Date, …) go through JSON so that distinct values stay distinct —
+        // String() would collapse every plain object to '[object Object]'.
+        const dedup = typeof raw === 'object' ? JSON.stringify(raw) : String(raw as string | number | boolean);
 
         for (let attempt = 0; ; attempt++) {
             try {
