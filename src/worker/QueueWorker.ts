@@ -1,4 +1,4 @@
-import type { Db } from 'mongodb';
+import type { Db, Document, Filter } from 'mongodb';
 import { ObjectId } from 'mongodb';
 
 import { MongoQueue } from '../queue/MongoQueue.js';
@@ -133,6 +133,11 @@ export class QueueWorker {
         const queue = this.queues.get(queueName) as MongoQueue<U> | undefined;
         if (!queue) throw new Error(`Unknown queue: ${queueName}`);
         return queue.add(payload, options);
+    }
+
+    /** Cancel matching tasks that no worker has claimed. Returns the number removed. */
+    async cancel(filter: Filter<Document>, queueName: string): Promise<number> {
+        return this.getQueue(queueName).cancel(filter);
     }
 
     /** Get direct access to a MongoQueue instance */

@@ -253,6 +253,55 @@ describe('MongoQueue', () => {
         });
     });
 
+    describe('cancel', () => {
+        it('should cancel a pending message', async () => {
+            await queue.add({ id: '1', data: 'x' });
+            expect(await queue.cancel({ 'payload.id': '1' })).toBe(1);
+            expect(await queue.total()).toBe(0);
+        });
+
+        it('should cancel a delayed message', async () => {
+            await queue.add({ id: '1', data: 'x' }, { delay: 60 });
+            expect(await queue.cancel({ 'payload.id': '1' })).toBe(1);
+        });
+
+        it('should NOT cancel a message a consumer has claimed', async () => {
+            await queue.add({ id: '1', data: 'x' });
+            const msg = await queue.get();
+
+            expect(await queue.cancel({ 'payload.id': '1' })).toBe(0);
+            await expect(queue.ack(msg!.ack)).resolves.toBe(msg!.id); // still ackable
+        });
+
+        it('should cancel a claimed message whose visibility has expired', async () => {
+            const shortQueue = new MongoQueue<{ id: string; data: string }>(db, `cancel-${Date.now()}`, {
+                visibility: 1,
+            });
+            await shortQueue.createIndexes();
+            await shortQueue.add({ id: '1', data: 'x' });
+            await shortQueue.get();
+            await new Promise(resolve => setTimeout(resolve, 1100));
+
+            expect(await shortQueue.cancel({ 'payload.id': '1' })).toBe(1);
+        });
+
+        it('should NOT remove acknowledged messages', async () => {
+            await queue.add({ id: '1', data: 'x' });
+            const msg = await queue.get();
+            await queue.ack(msg!.ack);
+
+            expect(await queue.cancel({ 'payload.id': '1' })).toBe(0);
+            expect(await queue.done()).toBe(1);
+        });
+
+        it('should only touch messages matching the filter', async () => {
+            await queue.add({ id: '1', data: 'x' });
+            await queue.add({ id: '2', data: 'y' });
+            expect(await queue.cancel({ 'payload.id': '2' })).toBe(1);
+            expect(await queue.size()).toBe(1);
+        });
+    });
+
     describe('constructor validation', () => {
         it('should throw when no db is provided', () => {
             expect(() => new MongoQueue(null as any, 'test')).toThrow('Please provide a mongodb Db instance');

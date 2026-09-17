@@ -638,6 +638,25 @@ describe('QueueWorker', () => {
         await new Promise(resolve => setTimeout(resolve, 20));
         expect(limiter.inUse).toBe(0); // the abandoned waiter released its late grant
     });
+
+    it('should cancel a pending task through the worker', async () => {
+        const handler: TaskHandler = {
+            async *work() {
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+
+        worker = createWorker(handler);
+        await worker.init();
+        const queueNames = [...(worker as any).queues.keys()];
+
+        await worker.add({ documentId: 'abc' }, queueNames[0]);
+        expect(await worker.cancel({ 'payload.documentId': 'abc' }, queueNames[0])).toBe(1);
+        expect(await worker.getQueue(queueNames[0]).total()).toBe(0);
+
+        await expect(worker.cancel({}, 'no-such-queue')).rejects.toThrow('Unknown queue');
+    });
 });
 
 function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {

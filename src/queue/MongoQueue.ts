@@ -226,6 +226,22 @@ export class MongoQueue<T = unknown> {
         return result.deletedCount;
     }
 
+    /**
+     * Remove matching messages that nobody is working on: not acknowledged, and either never
+     * claimed or claimed with an expired visibility. Unlike `remove()`, this never pulls a message
+     * out from under a consumer. Returns the number of messages removed.
+     */
+    async cancel(filter: Filter<Document>): Promise<number> {
+        const result = await this.collection.deleteMany({
+            $and: [
+                filter,
+                { deleted: null },
+                { $or: [{ ack: { $exists: false } }, { visible: { $lte: new Date() } }] },
+            ],
+        });
+        return result.deletedCount;
+    }
+
     async size(): Promise<number> {
         return this.collection.countDocuments({
             deleted: null,
