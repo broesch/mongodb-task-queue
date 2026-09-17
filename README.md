@@ -13,6 +13,9 @@ Use your existing MongoDB as a reliable task queue — no Redis or RabbitMQ need
 - **Heartbeat monitoring**: Async generator pattern — `yield true` to signal progress and extend visibility
 - **Change streams**: Real-time task detection with automatic fallback to polling
 - **Deduplication**: Built-in hashKey support to prevent duplicate tasks
+- **Shared concurrency**: One `ConcurrencyLimiter` across several workers — e.g. one worker per tenant database, one global limit
+- **Retry backoff**: `onError` can return a delay before a task becomes visible again
+- **Safe cancel**: Remove tasks that no worker has claimed yet
 - **Graceful shutdown**: Wait for in-flight tasks to complete before stopping
 - **TypeScript-first**: Full type definitions included
 - **Framework-agnostic**: Works with any Node.js project, with optional NestJS module
@@ -129,11 +132,12 @@ Low-level queue backed by a single MongoDB collection.
 |--------|-------------|
 | `constructor(db, name, options?)` | Create a queue. Options: `visibility` (seconds, default 30), `ttl` (seconds for deleted messages, default 86400), `extraIndexes` |
 | `createIndexes()` | Create required MongoDB indexes |
-| `add(payload, options?)` | Add a message. Options: `hashKey` (dedup field), `delay` (seconds) |
+| `add(payload, options?)` | Add a message. Options: `hashKey` (dedup field), `dedupScope` (`'all'` default — also matches acknowledged messages until their TTL; `'active'` — only pending and in-flight messages, atomic under concurrent adds), `delay` (seconds) |
 | `get(options?)` | Get next visible message. Options: `visibility` (override) |
 | `ping(ack, options?)` | Extend visibility for an in-flight message |
 | `ack(ack)` | Mark message as processed (soft delete) |
 | `remove(filter)` | Batch remove messages matching a MongoDB filter |
+| `cancel(filter)` | Remove matching messages that are not claimed by a consumer. Returns the count. Use this instead of `remove()` for user-facing "cancel" actions |
 | `size()` | Count of messages ready to process |
 | `total()` | Total messages (including in-flight and done) |
 | `inFlight()` | Count of messages currently being processed |
@@ -146,11 +150,12 @@ Full orchestration engine.
 
 | Method | Description |
 |--------|-------------|
-| `constructor(options)` | Configure queues, groups, handler, and logger |
+| `constructor(options)` | Configure queues, groups, handler, logger, and an optional shared `limiter` |
 | `init()` | Create indexes for all queues |
 | `start(groupName?)` | Start processing (all groups or a specific one) |
 | `stop(timeoutMs?)` | Graceful shutdown (default 30s timeout) |
 | `add(payload, queueName, options?)` | Enqueue a task |
+| `cancel(filter, queueName)` | Cancel matching tasks no worker has claimed |
 | `getQueue(name)` | Get direct access to a MongoQueue instance |
 | `getRunningTasks(groupName?)` | List currently processing tasks |
 
@@ -161,7 +166,7 @@ Interface your application implements:
 ```typescript
 interface TaskHandler<T = unknown> {
   work(payload: T, ctx: TaskContext): AsyncGenerator<true>;
-  onError(payload: T, tries: number, error: unknown): ErrorAction;
+  onError(payload: T, tries: number, error: unknown): ErrorAction | { action: ErrorAction.RETRY; delay: number };
   onFail?(payload: T, error: unknown): Promise<void>;
 }
 ```
@@ -175,6 +180,33 @@ enum ErrorAction {
   IGNORE = 'IGNORE', // Silently ack and discard
 }
 ```
+
+## Retry with backoff
+
+`onError` may return a delay in seconds. The task becomes visible again only after it:
+
+```typescript
+onError(payload, tries, error) {
+  if (tries >= 3) return ErrorAction.FAIL;
+  return { action: ErrorAction.RETRY, delay: 5 * 4 ** (tries - 1) }; // 5s, 20s
+}
+```
+
+## Sharing a concurrency limit across workers
+
+Each `QueueWorker` is bound to one database. To run one worker per database (e.g. per tenant) under
+one global limit — say, a rate-limited external API — pass them the same `ConcurrencyLimiter`:
+
+```typescript
+import { ConcurrencyLimiter, QueueWorker } from 'mongodb-task-queue';
+
+const limiter = new ConcurrencyLimiter(4);
+const workers = tenantDbs.map(db => new QueueWorker({ db, queues, groups, handler, limiter }));
+```
+
+A worker acquires a slot **before** it claims a task, so tasks that cannot run yet stay visible
+and unclaimed — they never burn their visibility timeout while waiting. Slots are granted first
+come, first served across all workers; the per-group `concurrency` still applies on top.
 
 ## NestJS Integration
 

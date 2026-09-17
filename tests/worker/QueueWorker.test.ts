@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import type { Db } from 'mongodb';
 import { QueueWorker } from '../../src/worker/QueueWorker';
+import { ConcurrencyLimiter } from '../../src/worker/ConcurrencyLimiter';
 import { ErrorAction } from '../../src/worker/types';
 import type { TaskHandler, TaskContext } from '../../src/worker/types';
 import { setup, teardown } from '../helpers/setup';
@@ -130,6 +131,39 @@ describe('QueueWorker', () => {
         await workerPromise;
 
         expect(attempts).toBe(3);
+    });
+
+    it('should delay a retry when onError returns a delay', async () => {
+        const attempts: number[] = [];
+
+        const handler: TaskHandler = {
+            async *work() {
+                attempts.push(Date.now());
+                if (attempts.length === 1) {
+                    throw new Error('throttled');
+                }
+                yield true;
+            },
+            onError: () => ({ action: ErrorAction.RETRY, delay: 1 }),
+        };
+
+        worker = createWorker(handler);
+        await worker.init();
+
+        const queueNames = [...(worker as any).queues.keys()];
+        await worker.add({ type: 'delayed-retry' }, queueNames[0]);
+
+        const workerPromise = worker.start('default');
+
+        await waitFor(() => attempts.length >= 2, 5000);
+
+        await worker.stop();
+        await workerPromise;
+
+        expect(attempts).toHaveLength(2);
+        const gap = attempts[1] - attempts[0];
+        expect(gap).toBeGreaterThanOrEqual(900); // honoured the 1 s delay …
+        expect(gap).toBeLessThan(3000); // … and was requeued, not re-delivered by the 5 s visibility timeout
     });
 
     it('should call onFail when task permanently fails', async () => {
@@ -502,6 +536,126 @@ describe('QueueWorker', () => {
 
         // Both groups should have started within ~50ms of each other (parallel)
         expect(Math.abs(groupAStart.time - groupBStart.time)).toBeLessThan(500);
+    });
+
+    it('should share one concurrency limit across workers and not claim while waiting', async () => {
+        const limiter = new ConcurrencyLimiter(1);
+        let running = 0;
+        let maxRunning = 0;
+        let completed = 0;
+        const gates: Array<() => void> = [];
+
+        const handler: TaskHandler = {
+            async *work() {
+                running++;
+                maxRunning = Math.max(maxRunning, running);
+                await new Promise<void>(resolve => gates.push(resolve));
+                running--;
+                completed++;
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+
+        const silent = { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} };
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const makeWorker = (name: string) =>
+            new QueueWorker({
+                db,
+                queues: [{ name, group: 'default', priority: 1, maxTaskAge: 5 }],
+                groups: { default: { concurrency: 2, pollingInterval: 50, useChangeStreams: false } },
+                handler,
+                logger: silent,
+                limiter,
+            });
+
+        const workerA = makeWorker(`shared-a-${id}`);
+        const workerB = makeWorker(`shared-b-${id}`);
+        worker = workerA; // afterEach stops it
+        await workerA.init();
+        await workerB.init();
+
+        await workerA.add({ n: 1 }, `shared-a-${id}`);
+        await workerB.add({ n: 2 }, `shared-b-${id}`);
+
+        const promiseA = workerA.start('default');
+        const promiseB = workerB.start('default');
+
+        // Exactly one task runs; the other worker must NOT have claimed its task.
+        await waitFor(() => running === 1, 5000);
+        await new Promise(resolve => setTimeout(resolve, 300));
+        expect(running).toBe(1);
+        const inFlight =
+            (await workerA.getQueue(`shared-a-${id}`).inFlight()) +
+            (await workerB.getQueue(`shared-b-${id}`).inFlight());
+        expect(inFlight).toBe(1);
+
+        // Let the first task finish; the second one starts only now.
+        gates.shift()!();
+        await waitFor(() => completed === 1 && running === 1, 5000);
+        gates.shift()!();
+        await waitFor(() => completed === 2, 5000);
+
+        await workerA.stop();
+        await workerB.stop();
+        await Promise.all([promiseA, promiseB]);
+
+        expect(maxRunning).toBe(1);
+        expect(limiter.inUse).toBe(0);
+    });
+
+    it('should not hang stop() while waiting for a limiter slot', async () => {
+        const limiter = new ConcurrencyLimiter(1);
+        const holdSlot = await limiter.acquire(); // nothing can ever run
+
+        const handler: TaskHandler = {
+            async *work() {
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        worker = new QueueWorker({
+            db,
+            queues: [{ name: `blocked-${id}`, group: 'default', priority: 1, maxTaskAge: 5 }],
+            groups: { default: { concurrency: 1, pollingInterval: 50, useChangeStreams: false } },
+            handler,
+            logger: { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} },
+            limiter,
+        });
+        await worker.init();
+        await worker.add({ n: 1 }, `blocked-${id}`);
+
+        const workerPromise = worker.start('default');
+        await waitFor(() => limiter.waiting === 1, 5000);
+
+        await worker.stop(1000);
+        await workerPromise; // must resolve even though no slot was ever granted
+
+        expect(await worker.getQueue(`blocked-${id}`).inFlight()).toBe(0);
+        holdSlot();
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(limiter.inUse).toBe(0); // the abandoned waiter released its late grant
+    });
+
+    it('should cancel a pending task through the worker', async () => {
+        const handler: TaskHandler = {
+            async *work() {
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+
+        worker = createWorker(handler);
+        await worker.init();
+        const queueNames = [...(worker as any).queues.keys()];
+
+        await worker.add({ documentId: 'abc' }, queueNames[0]);
+        expect(await worker.cancel({ 'payload.documentId': 'abc' }, queueNames[0])).toBe(1);
+        expect(await worker.getQueue(queueNames[0]).total()).toBe(0);
+
+        await expect(worker.cancel({}, 'no-such-queue')).rejects.toThrow('Unknown queue');
     });
 });
 
