@@ -1,6 +1,6 @@
 // Layer 1: Low-level queue
 export { MongoQueue } from './queue/MongoQueue.js';
-export type { Message, AddOptions, QueueOptions } from './queue/types.js';
+export type { Message, AddOptions, QueueOptions, DedupScope } from './queue/types.js';
 
 // Layer 2: Worker orchestration
 export { QueueWorker } from './worker/QueueWorker.js';

@@ -2,7 +2,7 @@ import type { Db } from 'mongodb';
 import { ObjectId } from 'mongodb';
 
 import { MongoQueue } from '../queue/MongoQueue.js';
-import type { Message } from '../queue/types.js';
+import type { DedupScope, Message } from '../queue/types.js';
 import { QueueTimeoutError, PingError, AckError, WrongAckIdError } from '../errors/index.js';
 import { raceWithTimeout } from './HeartbeatRunner.js';
 import { ChangeStreamWatcher } from './ChangeStreamWatcher.js';
@@ -128,7 +128,7 @@ export class QueueWorker {
     async add<U = unknown>(
         payload: U,
         queueName: string,
-        options?: { hashKey?: keyof U; delay?: number }
+        options?: { hashKey?: keyof U; delay?: number; dedupScope?: DedupScope }
     ): Promise<string> {
         const queue = this.queues.get(queueName) as MongoQueue<U> | undefined;
         if (!queue) throw new Error(`Unknown queue: ${queueName}`);

@@ -34,6 +34,9 @@ export class MongoQueue<T = unknown> {
         await this.collection.createIndex({ deleted: 1, visible: 1 });
         await this.collection.createIndex({ ack: 1 }, { unique: true, sparse: true });
 
+        // Active-scope dedup: `dedup` exists only while a message is pending or in flight.
+        await this.collection.createIndex({ dedup: 1 }, { unique: true, sparse: true });
+
         // TTL index on soft-deleted messages
         if (this._ttl > 0) {
             await this.collection.createIndex({ deleted: 1 }, { expireAfterSeconds: this._ttl });
@@ -67,6 +70,10 @@ export class MongoQueue<T = unknown> {
             return result.insertedId.toHexString();
         }
 
+        if (options?.dedupScope === 'active') {
+            return this.addActiveScoped(payload, hashKey, insertFields);
+        }
+
         // Deduplication: upsert based on hashKey
         let filter: Document;
         if (typeof payload === 'object' && payload !== null) {
@@ -90,6 +97,43 @@ export class MongoQueue<T = unknown> {
         }
 
         return message.value._id.toHexString();
+    }
+
+    /**
+     * Dedup against pending/in-flight messages only. The sparse unique index on `dedup` makes
+     * concurrent adds atomic: the loser of an insert race gets E11000 and retries as an update.
+     */
+    private async addActiveScoped(payload: T, hashKey: keyof T, insertFields: Document): Promise<string> {
+        const raw =
+            typeof payload === 'object' && payload !== null
+                ? (payload as Record<string, unknown>)[hashKey as string]
+                : payload;
+        if (raw === undefined || raw === null) {
+            throw new Error(`MongoQueue.add(): payload has no value for hashKey "${String(hashKey)}"`);
+        }
+        const dedup = String(raw);
+
+        for (let attempt = 0; ; attempt++) {
+            try {
+                const message = await this.collection.findOneAndUpdate(
+                    { dedup },
+                    {
+                        $inc: { occurrences: 1 },
+                        $set: { updatedAt: new Date() },
+                        // `dedup` itself is seeded by the equality filter of the upsert.
+                        $setOnInsert: insertFields,
+                    },
+                    { upsert: true, returnDocument: 'after', includeResultMetadata: true }
+                );
+                if (!message.value) {
+                    throw new Error('MongoQueue.add(): failed to add message');
+                }
+                return message.value._id.toHexString();
+            } catch (e) {
+                const duplicateKey = typeof e === 'object' && e !== null && (e as { code?: number }).code === 11000;
+                if (!duplicateKey || attempt >= 3) throw e;
+            }
+        }
     }
 
     async get(options: { visibility?: number } = {}): Promise<Message<T> | undefined> {
@@ -166,7 +210,7 @@ export class MongoQueue<T = unknown> {
 
         const result = await this.collection.findOneAndUpdate(
             { ack, visible: { $gt: new Date(now) }, deleted: null },
-            { $set: { deleted: new Date(now) } },
+            { $set: { deleted: new Date(now) }, $unset: { dedup: '' } },
             { returnDocument: 'after', includeResultMetadata: true }
         );
 

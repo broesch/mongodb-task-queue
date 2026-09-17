@@ -143,6 +143,55 @@ describe('MongoQueue', () => {
             expect(msg!.payload.data).toBe('first'); // original payload preserved
             expect(msg!.occurrences).toBe(2);
         });
+
+        it('should still deduplicate against acked messages by default (scope "all")', async () => {
+            const id1 = await queue.add({ id: 'dup', data: 'first' }, { hashKey: 'id' });
+            const msg = await queue.get();
+            await queue.ack(msg!.ack);
+
+            const id2 = await queue.add({ id: 'dup', data: 'second' }, { hashKey: 'id' });
+            expect(id2).toBe(id1);
+            expect(await queue.size()).toBe(0);
+        });
+
+        it('should deduplicate only against active messages with dedupScope "active"', async () => {
+            const opts = { hashKey: 'id', dedupScope: 'active' } as const;
+
+            const id1 = await queue.add({ id: 'dup', data: 'first' }, opts);
+            const id2 = await queue.add({ id: 'dup', data: 'second' }, opts);
+            expect(id2).toBe(id1); // pending → deduplicated
+            expect(await queue.size()).toBe(1);
+
+            const msg = await queue.get();
+            const id3 = await queue.add({ id: 'dup', data: 'third' }, opts);
+            expect(id3).toBe(id1); // in flight → still deduplicated
+
+            await queue.ack(msg!.ack);
+
+            const id4 = await queue.add({ id: 'dup', data: 'fourth' }, opts);
+            expect(id4).not.toBe(id1); // acked → a new task is accepted
+            expect(await queue.size()).toBe(1);
+            expect((await queue.get())!.payload.data).toBe('fourth');
+        });
+
+        it('should insert exactly one message for concurrent active-scope adds', async () => {
+            const opts = { hashKey: 'id', dedupScope: 'active' } as const;
+            const ids = await Promise.all(
+                Array.from({ length: 10 }, (_, i) => queue.add({ id: 'race', data: `n${i}` }, opts))
+            );
+
+            expect(new Set(ids).size).toBe(1);
+            expect(await queue.total()).toBe(1);
+        });
+
+        it('should reject an active-scope add whose hashKey value is missing', async () => {
+            await expect(
+                queue.add({ data: 'no id' } as unknown as { id: string; data: string }, {
+                    hashKey: 'id',
+                    dedupScope: 'active',
+                })
+            ).rejects.toThrow(/hashKey/);
+        });
     });
 
     describe('delay', () => {

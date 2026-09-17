@@ -10,9 +10,18 @@ export interface Message<T = unknown> {
     occurrences: number;
 }
 
+/**
+ * What a `hashKey` is deduplicated against:
+ * - `'all'` (default): every message in the collection, including acknowledged ones kept until
+ *   their TTL expires.
+ * - `'active'`: only messages that are pending or in flight.
+ */
+export type DedupScope = 'all' | 'active';
+
 export interface AddOptions<T = unknown> {
     hashKey?: keyof T;
     delay?: number;
+    dedupScope?: DedupScope;
 }
 
 export interface QueueOptions {
