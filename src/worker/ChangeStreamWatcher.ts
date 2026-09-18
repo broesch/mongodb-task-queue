@@ -1,4 +1,4 @@
-import type { Db, ChangeStream } from 'mongodb';
+import type { Db, ChangeStream, Timestamp } from 'mongodb';
 import type { Logger } from './types.js';
 
 export interface WaitExtras {
@@ -48,7 +48,11 @@ export class ChangeStreamWatcher {
         }
     }
 
-    private async watchForChange(collectionNames: string[], orUntil?: Date | null, extras: WaitExtras = {}): Promise<void> {
+    private async watchForChange(
+        collectionNames: string[],
+        orUntil?: Date | null,
+        extras: WaitExtras = {}
+    ): Promise<void> {
         const operation = { operationType: 'insert' };
 
         const pipeline = [
@@ -59,7 +63,19 @@ export class ChangeStreamWatcher {
             },
         ];
 
-        const stream = this.db.watch(pipeline);
+        // Capture the cluster time FIRST, then re-check for work, then open the stream FROM that
+        // time: an insert after the captured time is replayed by the stream, an earlier one is
+        // seen by the re-check. Without this, a task inserted between the caller's work check
+        // and the stream opening is reported by nobody.
+        const hello = await this.db.command({ hello: 1 });
+        const startAtOperationTime = hello.operationTime as Timestamp | undefined;
+        if (!startAtOperationTime) {
+            // Not a replica set: there are no change streams. The caller falls back to polling.
+            throw new Error('operationTime unavailable');
+        }
+        if (extras.recheck && (await extras.recheck())) return;
+
+        const stream = this.db.watch(pipeline, { startAtOperationTime });
         this._activeStream = stream;
         this._available = true;
 

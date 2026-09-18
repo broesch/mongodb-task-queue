@@ -3,7 +3,7 @@ import type { Db } from 'mongodb';
 import { QueueWorker } from '../../src/worker/QueueWorker';
 import { ErrorAction } from '../../src/worker/types';
 import type { TaskHandler } from '../../src/worker/types';
-import { setup, teardown } from '../helpers/setup';
+import { setup, teardown, setupReplSet, teardownReplSet } from '../helpers/setup';
 
 const silent = { debug: () => {}, log: () => {}, warn: () => {}, error: () => {} };
 const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -139,5 +139,117 @@ describe('worker wake-ups — polling mode', () => {
         });
 
         await waitFor(() => seen.includes(7), 5000);
+    });
+});
+
+describe('worker wake-ups — change-stream mode', () => {
+    let db: Db;
+    let worker: QueueWorker | undefined;
+
+    beforeAll(async () => {
+        db = await setupReplSet();
+    }, 120_000);
+    afterAll(async () => {
+        await teardownReplSet();
+    });
+    afterEach(async () => {
+        await worker?.stop(1000);
+        worker = undefined;
+    });
+
+    const makeWorker = (queue: string, handler: TaskHandler) =>
+        new QueueWorker({
+            db,
+            queues: [{ name: queue, group: 'g', priority: 1, maxTaskAge: 60 }],
+            // Far-away bounds: only the change stream / the wake signal can make these pass.
+            groups: { g: { concurrency: 2, pollingInterval: 60_000, useChangeStreams: true, maxIdleWait: 60_000 } },
+            handler,
+            logger: silent,
+        });
+
+    it('wakes on an insert from another process', async () => {
+        const queue = `cs-insert-${uid()}`;
+        const seen: number[] = [];
+        const handler: TaskHandler<{ n: number }> = {
+            async *work(payload) {
+                seen.push(payload.n);
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+        worker = makeWorker(queue, handler as TaskHandler);
+        await worker.init();
+        void worker.start('g');
+        await new Promise(r => setTimeout(r, 500)); // idle, stream open
+
+        await db.collection(queue).insertOne({
+            createdAt: new Date(),
+            visible: new Date(),
+            payload: { n: 1 },
+            tries: 0,
+            occurrences: 1,
+        });
+        await waitFor(() => seen.includes(1), 4000);
+    });
+
+    it('runs a delayed retry on time even though the loop parked before the failure', async () => {
+        const queue = `cs-retry-${uid()}`;
+        const attempts: number[] = [];
+        const handler: TaskHandler = {
+            async *work() {
+                attempts.push(Date.now());
+                if (attempts.length === 1) {
+                    await new Promise(r => setTimeout(r, 600));
+                    throw new Error('throttled');
+                }
+                yield true;
+            },
+            onError: () => ({ action: ErrorAction.RETRY, delay: 1 }),
+        };
+        worker = makeWorker(queue, handler);
+        await worker.init();
+        await worker.add({ n: 1 }, queue);
+        void worker.start('g');
+
+        await waitFor(() => attempts.length >= 2, 8000);
+        expect(attempts[1] - attempts[0]).toBeLessThan(4000);
+    });
+
+    it('does not miss a task inserted between the work check and the stream opening', async () => {
+        const queue = `cs-window-${uid()}`;
+        const seen: number[] = [];
+        const handler: TaskHandler<{ n: number }> = {
+            async *work(payload) {
+                seen.push(payload.n);
+                yield true;
+            },
+            onError: () => ErrorAction.FAIL,
+        };
+        worker = makeWorker(queue, handler as TaskHandler);
+        await worker.init();
+
+        // Insert a task exactly inside the window: after the LAST read the loop makes before it
+        // opens the stream. `getNextVisibleTime` runs after `hasWork`, so injecting at `hasWork`
+        // would only be found by that later read (and returned as an already-elapsed `orUntil`)
+        // instead of exercising the window at all.
+        const original = (worker as any).getNextVisibleTime.bind(worker) as (g: unknown) => Promise<Date | null>;
+        let injected = false;
+        (worker as any).getNextVisibleTime = async (group: unknown) => {
+            const nextVisible = await original(group);
+            if (!injected && nextVisible === null) {
+                injected = true;
+                await db.collection(queue).insertOne({
+                    createdAt: new Date(),
+                    visible: new Date(),
+                    payload: { n: 9 },
+                    tries: 0,
+                    occurrences: 1,
+                });
+            }
+            return nextVisible;
+        };
+
+        void worker.start('g');
+        await waitFor(() => seen.includes(9), 4000);
     });
 });
