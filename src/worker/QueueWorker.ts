@@ -55,6 +55,8 @@ export class QueueWorker {
     private readonly limiter?: ConcurrencyLimiter;
     private stopSignal!: Promise<null>;
     private resolveStop!: () => void;
+    private wakeSignal!: Promise<void>;
+    private resolveWake!: () => void;
 
     constructor(options: QueueWorkerOptions) {
         this.db = options.db;
@@ -62,6 +64,7 @@ export class QueueWorker {
         this.logger = options.logger ?? defaultLogger;
         this.limiter = options.limiter;
         this.armStopSignal();
+        this.armWakeSignal();
         this.watcher = new ChangeStreamWatcher(this.db, this.logger);
 
         // Build queue instances and groups
@@ -132,7 +135,9 @@ export class QueueWorker {
     ): Promise<string> {
         const queue = this.queues.get(queueName) as MongoQueue<U> | undefined;
         if (!queue) throw new Error(`Unknown queue: ${queueName}`);
-        return queue.add(payload, options);
+        const id = await queue.add(payload, options);
+        this.wake(); // local fast path; other processes are reached by the change stream
+        return id;
     }
 
     /** Cancel matching tasks that no worker has claimed. Returns the number removed. */
@@ -171,7 +176,8 @@ export class QueueWorker {
                     group.getCollectionNames(),
                     nextVisible,
                     group.pollingInterval,
-                    group.useChangeStreams
+                    group.useChangeStreams,
+                    { wake: this.wakeSignal, maxWaitMs: group.maxIdleWait, recheck: () => this.hasWork(group) }
                 );
                 if (this.stopped) break;
                 continue;
@@ -320,6 +326,7 @@ export class QueueWorker {
             { _id: new ObjectId(message.id) },
             { $set: { visible: new Date(now + delaySeconds * 1000), requeued: new Date(now) }, $unset: { ack: '' } }
         );
+        this.wake();
     }
 
     private getWeightedCount(groupName: string): number {
@@ -362,6 +369,23 @@ export class QueueWorker {
         this.stopSignal = new Promise<null>(resolve => {
             this.resolveStop = () => resolve(null);
         });
+    }
+
+    private armWakeSignal(): void {
+        this.wakeSignal = new Promise<void>(resolve => {
+            this.resolveWake = resolve;
+        });
+    }
+
+    /**
+     * End every idle wait of this worker now. A retry makes a task visible again through an
+     * UPDATE, which the insert-only change stream never reports — and the loop may already be
+     * waiting on a deadline that was computed before the failure.
+     */
+    private wake(): void {
+        const resolve = this.resolveWake;
+        this.armWakeSignal();
+        resolve();
     }
 
     /**
