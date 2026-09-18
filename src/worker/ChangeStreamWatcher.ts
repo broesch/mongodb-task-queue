@@ -69,16 +69,14 @@ export class ChangeStreamWatcher {
     }
 
     private async waitWithPolling(orUntil?: Date | null, pollingInterval: number = 2000): Promise<void> {
+        // Poll at the interval, or sooner when a task becomes visible before that. Never later:
+        // `orUntil` is often the visibility deadline of a task that is IN FLIGHT, and sleeping
+        // until it would stall every task enqueued meanwhile.
         let waitMs = pollingInterval;
-
-        if (orUntil && orUntil instanceof Date) {
-            const untilMs = orUntil.getTime() - Date.now();
-            if (untilMs > pollingInterval) {
-                waitMs = Math.max(0, untilMs);
-            }
+        if (orUntil instanceof Date) {
+            waitMs = Math.min(pollingInterval, Math.max(0, orUntil.getTime() - Date.now()));
         }
-
-        await sleep(Math.max(0, waitMs));
+        await sleep(waitMs);
     }
 
     async close(): Promise<void> {
