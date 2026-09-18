@@ -1,4 +1,4 @@
-import { MongoMemoryServer } from 'mongodb-memory-server';
+import { MongoMemoryServer, MongoMemoryReplSet } from 'mongodb-memory-server';
 import { MongoClient, type Db } from 'mongodb';
 
 let mongod: MongoMemoryServer;
@@ -21,4 +21,20 @@ export async function teardown(): Promise<void> {
 
 export function getDb(): Db {
     return db;
+}
+
+let replSet: MongoMemoryReplSet;
+let replClient: MongoClient;
+
+/** A single-node replica set — change streams need one. */
+export async function setupReplSet(): Promise<Db> {
+    replSet = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
+    replClient = new MongoClient(replSet.getUri());
+    await replClient.connect();
+    return replClient.db('test-queue-rs');
+}
+
+export async function teardownReplSet(): Promise<void> {
+    await replClient?.close();
+    await replSet?.stop();
 }

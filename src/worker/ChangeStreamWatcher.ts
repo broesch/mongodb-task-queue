@@ -1,5 +1,14 @@
-import type { Db, ChangeStream } from 'mongodb';
+import type { Db, ChangeStream, Timestamp } from 'mongodb';
 import type { Logger } from './types.js';
+
+export interface WaitExtras {
+    /** Resolves to end the wait early (an in-process wake-up). */
+    wake?: Promise<void>;
+    /** Upper bound of the wait in ms. */
+    maxWaitMs?: number;
+    /** Re-checked once the change stream is positioned; `true` ends the wait at once. */
+    recheck?: () => Promise<boolean>;
+}
 
 export class ChangeStreamWatcher {
     private _available: boolean | null = null;
@@ -22,23 +31,28 @@ export class ChangeStreamWatcher {
         collectionNames: string[],
         orUntil?: Date | null,
         pollingInterval?: number,
-        useChangeStreams = true
+        useChangeStreams = true,
+        extras: WaitExtras = {}
     ): Promise<void> {
         if (!useChangeStreams || this._available === false) {
-            return this.waitWithPolling(orUntil, pollingInterval ?? 2000);
+            return this.waitWithPolling(orUntil, pollingInterval ?? 2000, extras);
         }
 
         try {
-            await this.watchForChange(collectionNames, orUntil);
+            await this.watchForChange(collectionNames, orUntil, extras);
         } catch {
             // Change streams not available (not a replica set)
             this.logger.warn('Change streams unavailable, falling back to polling');
             this._available = false;
-            return this.waitWithPolling(orUntil, pollingInterval ?? 2000);
+            return this.waitWithPolling(orUntil, pollingInterval ?? 2000, extras);
         }
     }
 
-    private async watchForChange(collectionNames: string[], orUntil?: Date | null): Promise<void> {
+    private async watchForChange(
+        collectionNames: string[],
+        orUntil?: Date | null,
+        extras: WaitExtras = {}
+    ): Promise<void> {
         const operation = { operationType: 'insert' };
 
         const pipeline = [
@@ -49,36 +63,45 @@ export class ChangeStreamWatcher {
             },
         ];
 
-        const stream = this.db.watch(pipeline);
+        // Capture the cluster time FIRST, then re-check for work, then open the stream FROM that
+        // time: an insert after the captured time is replayed by the stream, an earlier one is
+        // seen by the re-check. Without this, a task inserted between the caller's work check
+        // and the stream opening is reported by nobody.
+        const hello = await this.db.command({ hello: 1 });
+        const startAtOperationTime = hello.operationTime as Timestamp | undefined;
+        if (!startAtOperationTime) {
+            // Not a replica set: there are no change streams. The caller falls back to polling.
+            throw new Error('operationTime unavailable');
+        }
+        if (extras.recheck && (await extras.recheck())) return;
+
+        const stream = this.db.watch(pipeline, { startAtOperationTime });
         this._activeStream = stream;
         this._available = true;
 
         try {
             const changePromise = stream.next();
 
-            if (orUntil && orUntil instanceof Date) {
-                const sleepMs = Math.max(0, orUntil.getTime() - Date.now());
-                await Promise.race([changePromise, sleep(sleepMs)]);
-            } else {
-                await changePromise;
-            }
+            const waitMs = boundedWait(Number.POSITIVE_INFINITY, orUntil, extras.maxWaitMs);
+            const waits: Promise<unknown>[] = [changePromise, extras.wake ?? never()];
+            if (Number.isFinite(waitMs)) waits.push(sleep(waitMs));
+            await Promise.race(waits);
         } finally {
             this._activeStream = null;
             await stream.close().catch(() => {});
         }
     }
 
-    private async waitWithPolling(orUntil?: Date | null, pollingInterval: number = 2000): Promise<void> {
-        let waitMs = pollingInterval;
-
-        if (orUntil && orUntil instanceof Date) {
-            const untilMs = orUntil.getTime() - Date.now();
-            if (untilMs > pollingInterval) {
-                waitMs = Math.max(0, untilMs);
-            }
-        }
-
-        await sleep(Math.max(0, waitMs));
+    private async waitWithPolling(
+        orUntil: Date | null | undefined,
+        pollingInterval: number,
+        extras: WaitExtras
+    ): Promise<void> {
+        // Poll at the interval, or sooner when a task becomes visible before that. Never later:
+        // `orUntil` is often the visibility deadline of a task that is IN FLIGHT, and sleeping
+        // until it would stall every task enqueued meanwhile.
+        const waitMs = boundedWait(pollingInterval, orUntil, extras.maxWaitMs);
+        await Promise.race([sleep(waitMs), extras.wake ?? never()]);
     }
 
     async close(): Promise<void> {
@@ -87,6 +110,18 @@ export class ChangeStreamWatcher {
             this._activeStream = null;
         }
     }
+}
+
+/** The shortest of: the base wait, the time until `orUntil`, and the cap. */
+function boundedWait(baseMs: number, orUntil: Date | null | undefined, maxWaitMs: number | undefined): number {
+    let waitMs = baseMs;
+    if (orUntil instanceof Date) waitMs = Math.min(waitMs, Math.max(0, orUntil.getTime() - Date.now()));
+    if (typeof maxWaitMs === 'number' && maxWaitMs > 0) waitMs = Math.min(waitMs, maxWaitMs);
+    return waitMs;
+}
+
+function never(): Promise<never> {
+    return new Promise(() => {});
 }
 
 function sleep(ms: number): Promise<void> {

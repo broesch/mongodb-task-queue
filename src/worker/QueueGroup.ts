@@ -10,6 +10,7 @@ export class QueueGroup {
     readonly name: string;
     readonly concurrency: number;
     readonly pollingInterval: number;
+    readonly maxIdleWait: number;
     readonly useChangeStreams: boolean;
     private readonly entries: QueueEntry[];
 
@@ -17,6 +18,7 @@ export class QueueGroup {
         this.name = name;
         this.concurrency = options.concurrency ?? 1;
         this.pollingInterval = options.pollingInterval ?? 2000;
+        this.maxIdleWait = options.maxIdleWait ?? 30000;
         this.useChangeStreams = options.useChangeStreams ?? true;
         // Sort by priority descending (higher priority first)
         this.entries = entries.sort((a, b) => b.definition.priority - a.definition.priority);

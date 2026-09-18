@@ -17,6 +17,11 @@ export interface GroupOptions {
     pollingInterval?: number;
     /** Whether to use MongoDB change streams (default: true, falls back to polling on error) */
     useChangeStreams?: boolean;
+    /**
+     * Longest an idle group waits before it looks for work again, in ms (default: 30000).
+     * A safety net in both modes: a missed signal then costs seconds, not a visibility timeout.
+     */
+    maxIdleWait?: number;
 }
 
 export enum ErrorAction {

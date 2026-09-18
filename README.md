@@ -81,7 +81,9 @@ const worker = new QueueWorker({
   ],
   groups: {
     tasks: { concurrency: 3, useChangeStreams: true },
-    io: { concurrency: 10, pollingInterval: 1000 },
+    // `maxIdleWait` (ms, default 30000): the longest an idle group waits before it looks
+    // for work again — a safety net in both change-stream and polling mode.
+    io: { concurrency: 10, pollingInterval: 1000, maxIdleWait: 30000 },
   },
   handler: {
     async *work(payload, ctx) {
@@ -158,6 +160,15 @@ Full orchestration engine.
 | `cancel(filter, queueName)` | Cancel matching tasks no worker has claimed |
 | `getQueue(name)` | Get direct access to a MongoQueue instance |
 | `getRunningTasks(groupName?)` | List currently processing tasks |
+
+#### `GroupOptions`
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `concurrency` | `1` | Max weighted concurrent tasks in the group |
+| `pollingInterval` | `2000` | Polling interval in ms when change streams are unavailable |
+| `useChangeStreams` | `true` | Use MongoDB change streams, falling back to polling on error |
+| `maxIdleWait` | `30000` | Longest an idle group waits before it looks again; a safety net in both modes |
 
 ### `TaskHandler`
 
@@ -239,7 +250,7 @@ The `QueueWorker` adds orchestration on top:
 - **Groups** share a concurrency limit across multiple queues
 - **Priority** determines which queue within a group is consumed first
 - **Heartbeats** (`yield true`) call `ping()` under the hood to extend visibility for long-running tasks
-- **Change streams** (on replica sets) provide instant notification of new tasks; falls back to polling on standalone instances
+- **Change streams** (on replica sets) report new tasks instantly — the stream is opened from a cluster time taken before the worker re-checks for work, so no insert falls between the two; a retry wakes the worker in-process; every idle wait is capped by `maxIdleWait`. On a standalone server the worker polls at `pollingInterval`.
 
 ## License
 
